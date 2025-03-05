@@ -1,5 +1,7 @@
 import time
 import asyncio
+import re
+import requests
 from telethon.sync import TelegramClient
 from telethon import errors
 
@@ -29,9 +31,65 @@ class TelegramForwarder:
         for dialog in dialogs:
             print(f"Chat ID: {dialog.id}, Title: {dialog.title}")
             chats_file.write(f"Chat ID: {dialog.id}, Title: {dialog.title} \n")
-          
 
         print("List of groups printed successfully!")
+
+    # Function to expand a shortened URL
+    def expand_url(self, short_url):
+        try:
+            response = requests.head(short_url, allow_redirects=True, timeout=10)
+            return response.url  # Returns the final expanded URL
+        except Exception as e:
+            print(f"Error expanding URL: {e}")
+            return None
+
+    # Function to shorten a URL using TinyURL API
+    def shorten_url(self, long_url):
+        try:
+            response = requests.get(f"http://tinyurl.com/api-create.php?url={long_url}", timeout=10)
+            return response.text  # Returns the shortened URL
+        except Exception as e:
+            print(f"Error shortening URL: {e}")
+            return None
+
+    # Function to modify the link by adding or replacing an affiliate code
+    def modify_link(self, link, affiliate_code="91304036201-21"):
+        # Check if the URL already contains a 'tag' parameter
+        if "tag=" in link:
+            # Replace the existing tag with your affiliate code
+            link = re.sub(r'tag=[^&]+', f'tag={affiliate_code}', link)
+        else:
+            # Append your affiliate code if no 'tag' parameter exists
+            if "?" in link:
+                link = f"{link}&tag={affiliate_code}"
+            else:
+                link = f"{link}?tag={affiliate_code}"
+        return link
+
+    # Function to process and modify message text (only for https://amzn.to/... links)
+    def process_message_text(self, text):
+        # Regular expression to detect URLs starting with https://amzn.to/
+        url_pattern = r'(https://amzn\.to/\S+)'
+        urls = re.findall(url_pattern, text)
+
+        for original_url in urls:
+            # Step 1: Expand the shortened URL
+            expanded_url = self.expand_url(original_url)
+            if not expanded_url:
+                continue  # Skip if expansion fails
+
+            # Step 2: Modify the expanded URL with affiliate code
+            modified_url = self.modify_link(expanded_url)
+
+            # Step 3: Re-shorten the modified URL (optional)
+            re_shortened_url = self.shorten_url(modified_url)
+            if not re_shortened_url:
+                re_shortened_url = modified_url  # Use the modified URL if re-shortening fails
+
+            # Replace the original URL with the re-shortened URL
+            text = text.replace(original_url, re_shortened_url)
+
+        return text
 
     async def forward_messages_to_channel(self, source_chat_id, destination_channel_id, keywords):
         await self.client.connect()
@@ -49,21 +107,21 @@ class TelegramForwarder:
             messages = await self.client.get_messages(source_chat_id, min_id=last_message_id, limit=None)
 
             for message in reversed(messages):
-                # Check if the message text includes any of the keywords
-                if keywords:
-                    if message.text and any(keyword in message.text.lower() for keyword in keywords):
-                        print(f"Message contains a keyword: {message.text}")
+                # Check if the message contains any Amazon links
+                if message.text:
+                    # Regular expression to detect Amazon links
+                    amazon_link_pattern = r'https://amzn\.to/\S+'
+                    if not re.search(amazon_link_pattern, message.text):
+                        print("No Amazon link found. Skipping message.")
+                        continue  # Skip messages without Amazon links
 
-                        # Forward the message to the destination channel
-                        await self.client.send_message(destination_channel_id, message.text)
+                # Process the message text to modify links
+                processed_text = self.process_message_text(message.text)
 
-                        print("Message forwarded")
-                else:
-                        # Forward the message to the destination channel
-                        await self.client.send_message(destination_channel_id, message.text)
+                # Forward the processed message to the destination channel
+                await self.client.send_message(destination_channel_id, processed_text)
 
-                        print("Message forwarded")
-
+                print("Message forwarded")
 
                 # Update the last message ID
                 last_message_id = max(last_message_id, message.id)
